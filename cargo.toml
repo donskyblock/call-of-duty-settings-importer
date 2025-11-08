@@ -1,0 +1,8 @@
+[package]
+name = "rust-practice"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+slint = "1.14.1"
+rfd = "0.10"
