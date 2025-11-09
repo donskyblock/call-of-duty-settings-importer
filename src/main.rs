@@ -1,3 +1,5 @@
+#![windows_subsystem = "windows"]
+
 use std::{
     collections::HashMap,
     fs,
@@ -61,19 +63,20 @@ impl eframe::App for SettingsApp {
                                 let filters = ["mouse", "fov", "brightness", "hdr", "adssensitivity", "gamepad", "sprint"];
                                 let export_path = Path::new("cod_settings_export.json");
                                 
-                                // Show which files we're exporting from
-                                println!("Exporting settings from:");
+                                // Build status message with file list
+                                let mut status = String::from("Exporting from:\n");
                                 for file in &settings_files {
-                                    println!("  - {}", file.display());
+                                    if let Some(name) = file.file_name().and_then(|n| n.to_str()) {
+                                        status.push_str(&format!("  • {}\n", name));
+                                    }
                                 }
+                                self.status_text = status;
                                 
                                 match export_to_json(&settings_files, export_path, &filters) {
                                     Ok(_) => {
-                                        println!("Settings exported to: {}", export_path.display());
-                                        self.status_text = format!("Settings exported to cod_settings_export.json");
+                                        self.status_text.push_str("\nSettings exported successfully to cod_settings_export.json");
                                     },
                                     Err(e) => {
-                                        println!("Export error: {}", e);
                                         self.status_text = format!("Export failed: {}", e);
                                     }
                                 }
@@ -90,22 +93,25 @@ impl eframe::App for SettingsApp {
                             .pick_file() 
                         {
                             self.status_text = "Importing settings...".to_string();
-                            println!("Importing settings from: {}", json_path.display());
+                            // Build status message for import process
+                            let mut status = format!("Importing from: {}\n", 
+                                json_path.file_name().unwrap_or_default().to_string_lossy());
                             
                             match find_cod_settings() {
                                 Ok(settings_files) => {
-                                    println!("Found these game settings files:");
+                                    status.push_str("\nUpdating files:\n");
                                     for file in &settings_files {
-                                        println!("  - {}", file.display());
+                                        if let Some(name) = file.file_name().and_then(|n| n.to_str()) {
+                                            status.push_str(&format!("  • {}\n", name));
+                                        }
                                     }
+                                    self.status_text = status;
                                     
                                     match import_from_json(&settings_files, &json_path) {
                                         Ok(_) => {
-                                            println!("Settings imported successfully!");
-                                            self.status_text = "Settings imported successfully!".to_string();
+                                            self.status_text.push_str("\nSettings imported successfully!");
                                         },
                                         Err(e) => {
-                                            println!("Import error: {}", e);
                                             self.status_text = format!("Import failed: {}", e);
                                         }
                                     }
@@ -161,8 +167,13 @@ impl eframe::App for SettingsApp {
                     }
                 });
 
-                // Status text
-                ui.label(&self.status_text);
+                // Status text in a scrolling area
+                egui::ScrollArea::vertical().max_height(150.0).show(ui, |ui| {
+                    ui.add(egui::TextEdit::multiline(&mut self.status_text)
+                        .desired_width(f32::INFINITY)
+                        .font(egui::TextStyle::Monospace)
+                        .interactive(false));
+                });
             });
         });
     }
