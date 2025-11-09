@@ -1,150 +1,187 @@
 use std::{
-    cell::RefCell,
     collections::HashMap,
     fs,
     io::{self, BufRead},
     path::{Path, PathBuf},
-    rc::Rc,
 };
 
 use chrono::Local;
 use dirs;
+use eframe::egui;
 use rfd::FileDialog;
 use serde_json::json;
-use slint::SharedString;
 
-// ---------------- SLINT UI ---------------- //
-slint::slint! {
-    component MainWindow inherits Window {  // Removed "export" - not needed for components in Slint
-        in-out property <string> cod_path_text: "Not set";
-        in-out property <string> status_text: "";
+struct SettingsApp {
+    cod_path: Option<PathBuf>,
+    status_text: String,
+}
 
-        callback select_cod_folder();
-        callback export_settings();
-        callback import_settings();
-        callback backup_settings();
-
-        title: "MW3 Settings Tool";
-        width: 420px;
-        height: 280px;
-
-        VerticalLayout {
-            spacing: 12px;
-            padding: 12px;
-
-            Text { text: cod_path_text; }
-
-            HorizontalLayout {
-                spacing: 8px;
-                Button { text: "Select Folder"; clicked => root.select_cod_folder(); }
-            }
-
-            HorizontalLayout {
-                spacing: 8px;
-                Button { text: "Export"; clicked => root.export_settings(); }
-                Button { text: "Import"; clicked => root.import_settings(); }
-                Button { text: "Backup"; clicked => root.backup_settings(); }
-            }
-
-            Text { text: status_text; }
+impl Default for SettingsApp {
+    fn default() -> Self {
+        Self {
+            cod_path: check_cod_default(),
+            status_text: String::new(),
         }
     }
 }
-// ------------------------------------------ //
 
-thread_local! {
-    static COD_PATH: Rc<RefCell<Option<PathBuf>>> = Rc::new(RefCell::new(None));
-}
+impl eframe::App for SettingsApp {
+    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        egui::CentralPanel::default().show(ctx, |ui| {
+            ui.vertical(|ui| {
+                // Path display
+                ui.horizontal(|ui| {
+                    ui.label("Game Path: ");
+                    ui.label(self.cod_path.as_ref()
+                        .map(|p| p.display().to_string())
+                        .unwrap_or_else(|| "Not set".to_string()));
+                });
 
-fn main() -> io::Result<()> {
-    let ui = MainWindow::new().unwrap();
-
-    // Detect default COD install path
-    if let Some(default_path) = check_cod_default() {
-        COD_PATH.with(|p| *p.borrow_mut() = Some(default_path.clone()));
-        ui.set_cod_path_text(SharedString::from(default_path.display().to_string()));
-    }
-
-    let ui_handle = ui.as_weak();
-    ui.on_select_cod_folder(move || {
-        let ui = ui_handle.unwrap();
-        if let Some(selected) = FileDialog::new().pick_folder() {
-            let cod_exe = selected.join("cod.exe");
-            if cod_exe.is_file() {
-                COD_PATH.with(|p| *p.borrow_mut() = Some(selected.clone()));
-                ui.set_cod_path_text(SharedString::from(selected.display().to_string()));
-                ui.set_status_text("COD path set successfully.".into());
-            } else {
-                ui.set_status_text("cod.exe not found in selected folder.".into());
-            }
-        } else {
-            ui.set_status_text("No folder selected.".into());
-        }
-    });
-
-    let ui_handle = ui.as_weak();
-    ui.on_export_settings(move || {
-        let ui = ui_handle.unwrap();
-        ui.set_status_text("Exporting settings...".into());
-
-        if let Ok(settings_file) = find_cod_settings() {
-            match parse_cod_settings(&settings_file) {
-                Ok(settings) => {
-                    let filters = ["mouse", "fov", "brightness", "hdr", "adssensitivity", "gamepad", "sprint"];
-                    let export_path = Path::new("cod_settings_export.json");
-                    if let Err(e) = export_to_json(&settings, export_path, &filters) {
-                        ui.set_status_text(SharedString::from(format!("Export failed: {}", e)));
+                // Select folder button
+                if ui.button("Select Folder").clicked() {
+                    if let Some(selected) = FileDialog::new().pick_folder() {
+                        let cod_exe = selected.join("cod.exe");
+                        if cod_exe.is_file() {
+                            self.cod_path = Some(selected);
+                            self.status_text = "COD path set successfully.".to_string();
+                        } else {
+                            self.status_text = "cod.exe not found in selected folder.".to_string();
+                        }
                     } else {
-                        ui.set_status_text(SharedString::from(format!("Export saved to {:?}", export_path)));
+                        self.status_text = "No folder selected.".to_string();
                     }
                 }
-                Err(e) => ui.set_status_text(SharedString::from(format!("Parse failed: {}", e))),
-            }
-        } else {
-            ui.set_status_text("Could not find settings file.".into());
-        }
-    });
 
-    let ui_handle = ui.as_weak();
-    ui.on_import_settings(move || {
-        let ui = ui_handle.unwrap();
-        if let Some(json_path) = FileDialog::new().add_filter("JSON", &["json"]).pick_file() {
-            ui.set_status_text("Importing...".into());
-            if let Ok(settings_file) = find_cod_settings() {
-                if let Err(e) = import_from_json(&settings_file, &json_path) {
-                    ui.set_status_text(SharedString::from(format!("Import failed: {}", e)));
-                } else {
-                    ui.set_status_text(SharedString::from(format!("Import successful from {:?}", json_path)));
-                }
-            } else {
-                ui.set_status_text("Settings file not found.".into());
-            }
-        } else {
-            ui.set_status_text("No JSON selected.".into());
-        }
-    });
+                ui.horizontal(|ui| {
+                    // Export button
+                    if ui.button("Export").clicked() {
+                        self.status_text = "Exporting settings...".to_string();
+                        match find_cod_settings() {
+                            Ok(settings_files) => {
+                                let filters = ["mouse", "fov", "brightness", "hdr", "adssensitivity", "gamepad", "sprint"];
+                                let export_path = Path::new("cod_settings_export.json");
+                                
+                                // Show which files we're exporting from
+                                println!("Exporting settings from:");
+                                for file in &settings_files {
+                                    println!("  - {}", file.display());
+                                }
+                                
+                                match export_to_json(&settings_files, export_path, &filters) {
+                                    Ok(_) => {
+                                        println!("Settings exported to: {}", export_path.display());
+                                        self.status_text = format!("Settings exported to cod_settings_export.json");
+                                    },
+                                    Err(e) => {
+                                        println!("Export error: {}", e);
+                                        self.status_text = format!("Export failed: {}", e);
+                                    }
+                                }
+                            }
+                            Err(e) => self.status_text = format!("Could not find settings files: {}", e),
+                        }
+                    }
 
-    let ui_handle = ui.as_weak();
-    ui.on_backup_settings(move || {
-        let ui = ui_handle.unwrap();
-        ui.set_status_text("Creating backup...".into());
-        if let Ok(settings_file) = find_cod_settings() {
-            let backup_path = settings_file.with_extension(format!(
-                "bak_{}",
-                Local::now().format("%Y%m%d_%H%M%S")
-            ));
-            if let Err(e) = fs::copy(&settings_file, &backup_path) {
-                ui.set_status_text(SharedString::from(format!("Backup failed: {}", e)));
-            } else {
-                ui.set_status_text(SharedString::from(format!("Backup created at {:?}", backup_path)));
-            }
-        } else {
-            ui.set_status_text("Settings file not found.".into());
-        }
-    });
+                    // Import button
+                    if ui.button("Import").clicked() {
+                        if let Some(json_path) = FileDialog::new()
+                            .add_filter("JSON", &["json"])
+                            .set_title("Select settings file to import")
+                            .pick_file() 
+                        {
+                            self.status_text = "Importing settings...".to_string();
+                            println!("Importing settings from: {}", json_path.display());
+                            
+                            match find_cod_settings() {
+                                Ok(settings_files) => {
+                                    println!("Found these game settings files:");
+                                    for file in &settings_files {
+                                        println!("  - {}", file.display());
+                                    }
+                                    
+                                    match import_from_json(&settings_files, &json_path) {
+                                        Ok(_) => {
+                                            println!("Settings imported successfully!");
+                                            self.status_text = "Settings imported successfully!".to_string();
+                                        },
+                                        Err(e) => {
+                                            println!("Import error: {}", e);
+                                            self.status_text = format!("Import failed: {}", e);
+                                        }
+                                    }
+                                }
+                                Err(e) => self.status_text = format!("Could not find settings files: {}", e),
+                            }
+                        } else {
+                            self.status_text = "No JSON selected.".to_string();
+                        }
+                    }
 
-    ui.run().unwrap();
-    Ok(())
+                    // Backup button
+                    if ui.button("Backup").clicked() {
+                        self.status_text = "Creating backups...".to_string();
+                        match find_cod_settings() {
+                            Ok(settings_files) => {
+                                let timestamp = Local::now().format("%Y%m%d_%H%M%S");
+                                let mut success_count = 0;
+                                let mut error_messages = Vec::new();
+
+                                for settings_file in settings_files {
+                                    let file_name = settings_file.file_name()
+                                        .and_then(|n| n.to_str())
+                                        .unwrap_or("unknown");
+                                    
+                                    // Create backup in the same directory as the original file
+                                    let backup_path = settings_file.with_file_name(
+                                        format!("{}.bak_{}", file_name, timestamp)
+                                    );
+
+                                    match fs::copy(&settings_file, &backup_path) {
+                                        Ok(_) => {
+                                            success_count += 1;
+                                            println!("Backed up: {} -> {}", 
+                                                settings_file.display(), 
+                                                backup_path.display());
+                                        },
+                                        Err(e) => error_messages.push(format!("{}: {}", file_name, e)),
+                                    }
+                                }
+
+                                if error_messages.is_empty() {
+                                    self.status_text = format!("Successfully backed up {} files", success_count);
+                                } else {
+                                    self.status_text = format!("Backed up {} files. Errors: {}", 
+                                        success_count, 
+                                        error_messages.join(", ")
+                                    );
+                                }
+                            }
+                            Err(e) => self.status_text = format!("Could not find settings files: {}", e),
+                        }
+                    }
+                });
+
+                // Status text
+                ui.label(&self.status_text);
+            });
+        });
+    }
+}
+
+fn main() -> eframe::Result<()> {
+    let mut options = eframe::NativeOptions::default();
+    options.viewport.inner_size = Some(egui::vec2(420.0, 280.0));
+    options.window_builder = Some(Box::new(|b| {
+        b.with_resizable(true)
+            .with_min_inner_size(egui::vec2(420.0, 280.0))
+            .with_title("MW3 Settings Tool")
+    }));
+
+    eframe::run_native(
+        "MW3 Settings Tool",
+        options,
+        Box::new(|_cc| Box::<SettingsApp>::default()),
+    )
 }
 
 // ---------------- HELPER FUNCTIONS ---------------- //
@@ -159,19 +196,36 @@ fn check_cod_default() -> Option<PathBuf> {
     }
 }
 
-fn find_cod_settings() -> io::Result<PathBuf> {
+fn find_cod_settings() -> io::Result<Vec<PathBuf>> {
     let docs = dirs::document_dir().ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "Documents folder not found"))?;
+    
+    // Find all steam user folders in the Call of Duty players directory
     let base = docs.join("Call of Duty/players");
-    for entry in fs::read_dir(base)? {
-        let entry = entry?;
-        if entry.file_type()?.is_dir() {
-            let path = entry.path().join("config.cfg");
-            if path.exists() {
-                return Ok(path);
+    let mut settings_files = Vec::new();
+
+    // Look in each user directory for settings files
+    if let Ok(user_dirs) = fs::read_dir(&base) {
+        for user_dir in user_dirs.filter_map(Result::ok) {
+            if user_dir.file_type().map(|ft| ft.is_dir()).unwrap_or(false) {
+                // Look for g.*.txt* files in each user directory
+                if let Ok(entries) = fs::read_dir(user_dir.path()) {
+                    for entry in entries.filter_map(Result::ok) {
+                        let file_name = entry.file_name().to_string_lossy().to_string();
+                        // Match patterns like 'g.1.0.l.txt0', 'g.1.0.l.txt1', etc.
+                        if file_name.starts_with("g.") && (file_name.ends_with(".txt0") || file_name.ends_with(".txt1")) {
+                            settings_files.push(entry.path());
+                        }
+                    }
+                }
             }
         }
     }
-    Err(io::Error::new(io::ErrorKind::NotFound, "Settings file not found"))
+
+    if settings_files.is_empty() {
+        Err(io::Error::new(io::ErrorKind::NotFound, "No settings files found"))
+    } else {
+        Ok(settings_files)
+    }
 }
 
 fn parse_cod_settings(path: &Path) -> io::Result<HashMap<String, String>> {
@@ -188,44 +242,67 @@ fn parse_cod_settings(path: &Path) -> io::Result<HashMap<String, String>> {
     Ok(map)
 }
 
-fn export_to_json(settings: &HashMap<String, String>, output: &Path, filters: &[&str]) -> io::Result<()> {
-    let filtered: HashMap<_, _> = settings
-        .iter()
-        .filter(|(k, _)| filters.iter().any(|f| k.to_lowercase().contains(f)))
-        .map(|(k, v)| (k.clone(), v.clone()))
-        .collect();
-    fs::write(output, serde_json::to_string_pretty(&json!(filtered))?)?;
-    Ok(())
-}
-
-fn import_from_json(settings_file: &Path, json_path: &Path) -> io::Result<()> {
-    let content = fs::read_to_string(json_path)?;
-    let imported: HashMap<String, String> = serde_json::from_str(&content)?;
-    let mut lines: Vec<String> = fs::read_to_string(settings_file)?
-        .lines()
-        .map(|l| l.to_string())
-        .collect();
-
-    // Improved logic: Update existing lines or add new ones if the key doesn't exist
-    let mut updated = false;
-    for (k, v) in &imported {
-        let mut found = false;
-        for line in &mut lines {
-            if line.trim_start().starts_with(k) && line.contains('=') {
-                *line = format!("{} = {}", k, v);
-                found = true;
-                updated = true;
-                break;
-            }
-        }
-        if !found {
-            lines.push(format!("{} = {}", k, v));  // Add new key-value if not found
-            updated = true;
+fn export_to_json(settings_files: &[PathBuf], output: &Path, filters: &[&str]) -> io::Result<()> {
+    let mut all_settings = HashMap::new();
+    
+    for file in settings_files {
+        let file_name = file.file_name()
+            .and_then(|f| f.to_str())
+            .unwrap_or("unknown")
+            .to_string();
+            
+        if let Ok(settings) = parse_cod_settings(file) {
+            let filtered: HashMap<_, _> = settings
+                .iter()
+                .filter(|(k, _)| filters.iter().any(|f| k.to_lowercase().contains(f)))
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect();
+            
+            all_settings.insert(file_name, filtered);
         }
     }
 
-    if updated {
-        fs::write(settings_file, lines.join("\n"))?;
+    fs::write(output, serde_json::to_string_pretty(&json!(all_settings))?)?;
+    Ok(())
+}
+
+fn import_from_json(settings_files: &[PathBuf], json_path: &Path) -> io::Result<()> {
+    let content = fs::read_to_string(json_path)?;
+    let imported: HashMap<String, HashMap<String, String>> = serde_json::from_str(&content)?;
+
+    for file in settings_files {
+        let file_name = file.file_name()
+            .and_then(|f| f.to_str())
+            .unwrap_or("unknown")
+            .to_string();
+
+        if let Some(settings) = imported.get(&file_name) {
+            let mut lines: Vec<String> = fs::read_to_string(file)?
+                .lines()
+                .map(|l| l.to_string())
+                .collect();
+
+            let mut updated = false;
+            for (k, v) in settings {
+                let mut found = false;
+                for line in &mut lines {
+                    if line.trim_start().starts_with(k) && line.contains('=') {
+                        *line = format!("{} = {}", k, v);
+                        found = true;
+                        updated = true;
+                        break;
+                    }
+                }
+                if !found {
+                    lines.push(format!("{} = {}", k, v));
+                    updated = true;
+                }
+            }
+
+            if updated {
+                fs::write(file, lines.join("\n"))?;
+            }
+        }
     }
     Ok(())
 }
